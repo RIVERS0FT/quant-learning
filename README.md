@@ -8,6 +8,7 @@
 Quant/
 ├── README.md
 ├── DAILY-LEARNING-TEMPLATE.md
+├── COURSE-SPEC-RESOLUTION.md
 ├── stage-01-python-numpy-financial-data/
 │   ├── README.md
 │   ├── week-01-python-environment-basics/
@@ -70,6 +71,8 @@ Quant/
 | 第 12 周 | 数据质量与阶段项目 | 完成数据质量报告和阶段总结 |
 
 ## 课程规范优先级
+
+详细处理记录见 [课程规范冲突处理说明](COURSE-SPEC-RESOLUTION.md)。
 
 1. [每日学习内容标准模板](DAILY-LEARNING-TEMPLATE.md) 是当前每日课程唯一有效的格式规范。
 2. 规范优先级为：根目录 `README.md` 与 `DAILY-LEARNING-TEMPLATE.md` 高于阶段 README、周 README 和历史每日课程中的局部说明。
