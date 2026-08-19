@@ -170,3 +170,25 @@ TuShare / Datafeed
 ```
 
 跑通以后，再扩大到沪深300历史成分并使用 Alpha158。
+
+## 10. 环境验证
+
+已确认 VeighNa 自带 Python 环境可以正常导入 `vnpy.alpha` 及其核心依赖：
+
+```powershell
+C:\veighna_studio\python.exe -c "from vnpy.alpha import AlphaLab; import polars, sklearn, alphalens; print('vnpy.alpha OK')"
+```
+
+输出：
+
+```text
+vnpy.alpha OK
+```
+
+说明当前 `vnpy.alpha` 研究环境已经可用。需要注意，后续安装依赖应始终使用 VeighNa 自带解释器：
+
+```powershell
+C:\veighna_studio\python.exe -m pip install <package>
+```
+
+不要直接使用系统 `pip install`，否则依赖可能被装到系统 Python 的用户目录，导致 VeighNa 环境无法导入。
