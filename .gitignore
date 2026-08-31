@@ -1,5 +1,8 @@
 # 模型/回测脚本统一输出目录，不参与提交
 code/outputs/
 
+# 股票资本迁移模型本地市场数据缓存，不参与提交
+code/data/
+
 # Python 字节码缓存
 __pycache__/
