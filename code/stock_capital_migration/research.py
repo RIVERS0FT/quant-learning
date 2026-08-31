@@ -1,16 +1,16 @@
 # -*- coding: utf-8 -*-
 """股票资本迁移模型：研究增强版。
 
-在 stock_capital_migration.py 基线模型上增加：
+在 stock_capital_migration 基线包上增加：
 1. 本地增量缓存：价格 / 主力资金流 / 历史估值。
 2. 1/3/5/10/20 个交易日前瞻收益与 Rank IC。
 3. A-G 七组因子消融实验，比较普通因子与 Gravity/Migration 的增量价值。
 
-运行：
-    python stock_capital_migration_research.py
-    python stock_capital_migration_research.py --offline
-    python stock_capital_migration_research.py --refresh-cache
-    python stock_capital_migration_research.py --skip-ablation
+运行（在 code/ 目录下）：
+    python -m stock_capital_migration.research
+    python -m stock_capital_migration.research --offline
+    python -m stock_capital_migration.research --refresh-cache
+    python -m stock_capital_migration.research --skip-ablation
 """
 
 from __future__ import annotations
@@ -23,11 +23,30 @@ from typing import Mapping
 import numpy as np
 import pandas as pd
 
-import stock_capital_migration as base
+# 兼容层：研究脚本历史上以 `base.` 前缀引用基线单体脚本；
+# 基线拆分为包后，从各子模块聚合同名命名空间，正文保持原样。
+from types import SimpleNamespace
+
+from . import backtest, config, data, features, model
+
+base = SimpleNamespace(
+    Config=config.Config,
+    DEFAULT_UNIVERSE=config.DEFAULT_UNIVERSE,
+    VALUATION_DATA_COLS=config.VALUATION_DATA_COLS,
+    call_with_retry=data.call_with_retry,
+    fetch_price=data.fetch_price,
+    fetch_flow=data.fetch_flow,
+    fetch_valuation=data.fetch_valuation,
+    attach_valuation=data.attach_valuation,
+    add_features=features.add_features,
+    build_distance=model.build_distance,
+    gravity_flows=model.gravity_flows,
+    rank_ic=backtest.rank_ic,
+)
 
 
 HORIZONS = (1, 3, 5, 10, 20)
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = Path(__file__).resolve().parents[1]  # code/ 目录：data 与 outputs 均固定于此
 DEFAULT_DATA_DIR = BASE_DIR / "data"
 DEFAULT_OUTPUT_DIR = BASE_DIR / "outputs"
 
