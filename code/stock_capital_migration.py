@@ -22,17 +22,19 @@
     python stock_capital_migration.py --top-n 3 --no-plot
 
 输出：
-- stock_capital_migration_snapshot.csv
-- stock_capital_migration_edges.csv
-- stock_capital_migration_backtest.csv
-- stock_capital_migration_ic.csv
-- stock_capital_migration_valuation.csv
-- stock_capital_migration_nav.png
+- 所有结果文件统一写入 code/outputs/（可用 --output-dir 覆盖）：
+  stock_capital_migration_snapshot.csv
+  stock_capital_migration_edges.csv
+  stock_capital_migration_backtest.csv
+  stock_capital_migration_ic.csv
+  stock_capital_migration_valuation.csv
+  stock_capital_migration_nav.png
 """
 
 from __future__ import annotations
 
 import argparse
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
@@ -69,6 +71,34 @@ VALUATION_DATA_COLS = [
     "total_market_cap",
     "float_market_cap",
 ]
+
+# 所有输出文件统一写入该目录；目录整体被 .gitignore 排除，不参与提交。
+DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent / "outputs"
+
+# 东财 push2his 接口存在突发限流：连续请求会触发一段"直接断连"的封锁窗口。
+# 因此对每次网络调用做重试+退避，并在请求之间主动限速。
+FETCH_MAX_RETRIES = 5
+FETCH_RETRY_BASE_DELAY_SECONDS = 5.0
+FETCH_PAUSE_SECONDS = 0.8
+
+
+def call_with_retry(fetch, label: str):
+    """对东财接口调用做重试与退避，抵御间歇性断连/限流。"""
+    for attempt in range(FETCH_MAX_RETRIES + 1):
+        try:
+            result = fetch()
+            time.sleep(FETCH_PAUSE_SECONDS)
+            return result
+        except Exception:
+            if attempt >= FETCH_MAX_RETRIES:
+                raise
+            delay = FETCH_RETRY_BASE_DELAY_SECONDS * (attempt + 1)
+            print(
+                f"  {label} 请求失败，"
+                f"{delay:.0f}s 后重试 "
+                f"({attempt + 1}/{FETCH_MAX_RETRIES}) ..."
+            )
+            time.sleep(delay)
 
 
 @dataclass(frozen=True)
@@ -271,21 +301,29 @@ def load_data(
     for symbol, meta in universe.items():
         print(f"下载 {symbol} {meta['name']} ...")
         try:
-            base = fetch_price(symbol, start_date, end_date).merge(
-                fetch_flow(symbol),
-                on="date",
-                how="left",
+            # 行情与资金流分开重试：一个接口成功后不因另一个失败而重拉。
+            price_df = call_with_retry(
+                lambda: fetch_price(symbol, start_date, end_date),
+                f"{symbol} 行情",
             )
+            flow_df = call_with_retry(
+                lambda: fetch_flow(symbol),
+                f"{symbol} 资金流",
+            )
+            base = price_df.merge(flow_df, on="date", how="left")
         except Exception as exc:
             failures.append(f"{symbol} {meta['name']}: {exc}")
             continue
 
         try:
-            valuation = fetch_valuation(
-                symbol,
-                start_date,
-                end_date,
-                lookback_days=cfg.valuation_max_staleness_days,
+            valuation = call_with_retry(
+                lambda: fetch_valuation(
+                    symbol,
+                    start_date,
+                    end_date,
+                    lookback_days=cfg.valuation_max_staleness_days,
+                ),
+                f"{symbol} 估值",
             )
             df = attach_valuation(base, valuation, cfg)
         except Exception as exc:
@@ -504,7 +542,15 @@ def build_distance(
     total_w = sum(w for w, _ in active)
     distance = sum(w * d for w, d in active) / total_w
     distance = distance.clip(lower=cfg.min_distance)
-    np.fill_diagonal(distance.values, np.inf)
+    # pandas 3.x Copy-on-Write 下 DataFrame.values 可能是只读视图，
+    # 必须先复制再写对角线，否则 np.fill_diagonal 会抛 read-only 错误。
+    distance_values = distance.to_numpy(dtype=float, copy=True)
+    np.fill_diagonal(distance_values, np.inf)
+    distance = pd.DataFrame(
+        distance_values,
+        index=distance.index,
+        columns=distance.columns,
+    )
     return distance
 
 
@@ -755,8 +801,10 @@ def save_results(
     ic_df: pd.DataFrame,
     portfolio: pd.DataFrame,
     no_plot: bool,
+    output_dir: Path,
 ) -> None:
-    out = Path(__file__).resolve().parent
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
 
     latest.reset_index().to_csv(
         out / "stock_capital_migration_snapshot.csv",
@@ -940,6 +988,16 @@ def parse_args() -> argparse.Namespace:
         "--no-plot",
         action="store_true",
     )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=DEFAULT_OUTPUT_DIR,
+        help=(
+            "结果输出目录"
+            f"（默认：{DEFAULT_OUTPUT_DIR}，"
+            "整个目录已被 .gitignore 排除）"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -998,6 +1056,7 @@ def main() -> None:
         ic_df,
         portfolio,
         args.no_plot,
+        args.output_dir,
     )
     print_summary(
         latest_date,

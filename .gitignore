@@ -1,0 +1,5 @@
+# 模型/回测脚本统一输出目录，不参与提交
+code/outputs/
+
+# Python 字节码缓存
+__pycache__/
