@@ -127,6 +127,8 @@ def fetch_cn_security_master() -> pd.DataFrame:
     out["exchange"] = out["symbol"].map(infer_cn_exchange)
     out["source_sector"] = ""
     out["source_industry"] = ""
+    out["source_taxonomy"] = "EastmoneyIndustryBoard"
+    out["metadata_asof_date"] = pd.Timestamp.now(tz="UTC").date().isoformat()
     out["active"] = True
     out["instrument_type"] = "CommonStock"
     for col in ["market_cap", "float_market_cap", "pe_current", "pb_current"]:
@@ -135,8 +137,8 @@ def fetch_cn_security_master() -> pd.DataFrame:
         out[col] = pd.to_numeric(out[col], errors="coerce")
     keep = [
         "symbol", "provider_symbol", "name", "market", "exchange", "active",
-        "instrument_type", "source_sector", "source_industry", "market_cap",
-        "float_market_cap", "pe_current", "pb_current",
+        "instrument_type", "source_sector", "source_industry", "source_taxonomy",
+        "metadata_asof_date", "market_cap", "float_market_cap", "pe_current", "pb_current",
     ]
     return out[keep].drop_duplicates(["market", "symbol"]).reset_index(drop=True)
 
@@ -303,6 +305,8 @@ def fetch_us_security_master(include_non_common: bool = False) -> pd.DataFrame:
     joined["float_market_cap"] = np.nan
     joined["pb_current"] = np.nan
     joined["market"] = "US"
+    joined["source_taxonomy"] = "NasdaqScreener"
+    joined["metadata_asof_date"] = pd.Timestamp.now(tz="UTC").date().isoformat()
     joined["active"] = True
     joined["instrument_type"] = joined["name"].map(_infer_us_instrument_type)
     if not include_non_common:
@@ -311,8 +315,8 @@ def fetch_us_security_master(include_non_common: bool = False) -> pd.DataFrame:
         ].copy()
     keep = [
         "symbol", "provider_symbol", "name", "market", "exchange", "active",
-        "instrument_type", "source_sector", "source_industry", "market_cap",
-        "float_market_cap", "pe_current", "pb_current",
+        "instrument_type", "source_sector", "source_industry", "source_taxonomy",
+        "metadata_asof_date", "market_cap", "float_market_cap", "pe_current", "pb_current",
     ]
     return joined[keep].drop_duplicates(["market", "symbol"]).reset_index(drop=True)
 
