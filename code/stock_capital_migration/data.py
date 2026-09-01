@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""数据获取与本地增量缓存：行情/资金流/历史估值，含限流重试。"""
+"""数据获取与本地增量缓存：行情、可选主力资金流、历史估值。"""
 
 from __future__ import annotations
 
@@ -17,15 +17,8 @@ import pandas as pd
 
 from .config import Config, DEFAULT_DATA_DIR, VALUATION_DATA_COLS
 
-
-# 东财 push2his 接口存在突发限流：连续请求会触发一段"直接断连"的封锁窗口。
-# 因此对每次网络调用做重试+退避，并在请求之间主动限速。
 FETCH_MAX_RETRIES = 5
-
-
 FETCH_RETRY_BASE_DELAY_SECONDS = 5.0
-
-
 FETCH_PAUSE_SECONDS = 0.8
 
 
@@ -41,8 +34,7 @@ def call_with_retry(fetch, label: str):
                 raise
             delay = FETCH_RETRY_BASE_DELAY_SECONDS * (attempt + 1)
             print(
-                f"  {label} 请求失败，"
-                f"{delay:.0f}s 后重试 "
+                f"  {label} 请求失败，{delay:.0f}s 后重试 "
                 f"({attempt + 1}/{FETCH_MAX_RETRIES}) ..."
             )
             time.sleep(delay)
@@ -60,8 +52,6 @@ def infer_market(symbol: str) -> str:
 def fetch_price(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
     if ak is None:
         raise RuntimeError("未安装 akshare，请先运行: pip install akshare")
-    # 行情走新浪源（同 maotai 系列脚本）：东财 push2his 突发限流时直接断连，
-    # 新浪接口无此问题；注意新浪源不支持北交所代码。
     df = ak.stock_zh_a_daily(
         symbol=f"{infer_market(symbol)}{symbol}",
         start_date=start_date,
@@ -79,14 +69,19 @@ def fetch_price(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
 
     df["date"] = pd.to_datetime(df["date"])
     for col in ["open", "high", "low", "close", "volume", "amount"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    keep = [c for c in ["date", "open", "high", "low", "close", "volume", "amount"] if c in df.columns]
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    keep = [
+        c for c in ["date", "open", "high", "low", "close", "volume", "amount"]
+        if c in df.columns
+    ]
     df = df[keep]
-    df["symbol"] = symbol
+    df["symbol"] = str(symbol).zfill(6)
     return df.sort_values("date")
 
 
 def fetch_flow(symbol: str) -> pd.DataFrame:
+    """可选辅助数据：主力净流入。核心 OT 模型不依赖此接口。"""
     if ak is None:
         raise RuntimeError("未安装 akshare，请先运行: pip install akshare")
     df = ak.stock_individual_fund_flow(stock=symbol, market=infer_market(symbol))
@@ -103,81 +98,47 @@ def fetch_flow(symbol: str) -> pd.DataFrame:
         raise RuntimeError(f"{symbol} 资金流缺少主力净流入字段")
     df["date"] = pd.to_datetime(df["date"])
     df["main_net_flow"] = pd.to_numeric(df["main_net_flow"], errors="coerce")
-    return (
-        df[["date", "main_net_flow"]]
-        .drop_duplicates("date")
-        .sort_values("date")
-    )
+    return df[["date", "main_net_flow"]].drop_duplicates("date").sort_values("date")
 
 
-def fetch_valuation(
-    symbol: str,
-    start_date: str,
-    end_date: str,
-    lookback_days: int = 10,
-) -> pd.DataFrame:
-    """获取真实历史估值。stock_value_em 当前返回最多约 5000 条历史记录。"""
+def fetch_valuation(symbol: str, start_date: str, end_date: str, lookback_days: int = 10) -> pd.DataFrame:
     if ak is None:
         raise RuntimeError("未安装 akshare，请先运行: pip install akshare")
     if not hasattr(ak, "stock_value_em"):
-        raise RuntimeError(
-            "当前 AkShare 缺少 stock_value_em，请升级: pip install -U akshare"
-        )
-
+        raise RuntimeError("当前 AkShare 缺少 stock_value_em，请升级: pip install -U akshare")
     df = ak.stock_value_em(symbol=symbol)
     if df.empty:
         raise RuntimeError(f"{symbol} 无历史估值数据")
-
-    df = df.rename(
-        columns={
-            "数据日期": "valuation_date",
-            "PE(TTM)": "pe_ttm",
-            "市净率": "pb",
-            "市销率": "ps_ttm",
-            "总市值": "total_market_cap",
-            "流通市值": "float_market_cap",
-        }
-    ).copy()
-
+    df = df.rename(columns={
+        "数据日期": "valuation_date",
+        "PE(TTM)": "pe_ttm",
+        "市净率": "pb",
+        "市销率": "ps_ttm",
+        "总市值": "total_market_cap",
+        "流通市值": "float_market_cap",
+    }).copy()
     if "valuation_date" not in df.columns:
         raise RuntimeError(f"{symbol} 历史估值缺少数据日期字段")
-
     for col in VALUATION_DATA_COLS:
         if col not in df.columns:
             df[col] = np.nan
-
     df["valuation_date"] = pd.to_datetime(df["valuation_date"], errors="coerce")
     for col in VALUATION_DATA_COLS[1:]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
-
     start = pd.to_datetime(start_date) - pd.Timedelta(days=lookback_days)
     end = pd.to_datetime(end_date)
-    df = df[
-        (df["valuation_date"] >= start)
-        & (df["valuation_date"] <= end)
-    ].copy()
-
-    return (
-        df[VALUATION_DATA_COLS]
-        .dropna(subset=["valuation_date"])
-        .drop_duplicates("valuation_date", keep="last")
-        .sort_values("valuation_date")
-    )
+    df = df[(df["valuation_date"] >= start) & (df["valuation_date"] <= end)].copy()
+    return df[VALUATION_DATA_COLS].dropna(subset=["valuation_date"]).drop_duplicates("valuation_date", keep="last").sort_values("valuation_date")
 
 
-def attach_valuation(
-    base: pd.DataFrame,
-    valuation: pd.DataFrame,
-    cfg: Config,
-) -> pd.DataFrame:
-    """把估值向后对齐到行情日，只允许使用当天或更早的数据。"""
+def attach_valuation(base: pd.DataFrame, valuation: pd.DataFrame, cfg: Config) -> pd.DataFrame:
+    """估值只向后对齐，历史时点不会读取未来估值。"""
     left = base.sort_values("date").copy()
     if valuation.empty:
         for col in VALUATION_DATA_COLS:
             left[col] = pd.NaT if col == "valuation_date" else np.nan
         left["valuation_age_days"] = np.nan
         return left
-
     merged = pd.merge_asof(
         left,
         valuation.sort_values("valuation_date"),
@@ -186,9 +147,7 @@ def attach_valuation(
         direction="backward",
         tolerance=pd.Timedelta(days=cfg.valuation_max_staleness_days),
     )
-    merged["valuation_age_days"] = (
-        merged["date"] - merged["valuation_date"]
-    ).dt.days
+    merged["valuation_age_days"] = (merged["date"] - merged["valuation_date"]).dt.days
     return merged
 
 
@@ -212,12 +171,7 @@ def merge_cache(old: pd.DataFrame, new: pd.DataFrame, date_col: str) -> pd.DataF
     if merged.empty:
         return merged
     merged[date_col] = pd.to_datetime(merged[date_col], errors="coerce")
-    return (
-        merged.dropna(subset=[date_col])
-        .drop_duplicates(date_col, keep="last")
-        .sort_values(date_col)
-        .reset_index(drop=True)
-    )
+    return merged.dropna(subset=[date_col]).drop_duplicates(date_col, keep="last").sort_values(date_col).reset_index(drop=True)
 
 
 def write_cache(df: pd.DataFrame, path: Path, date_col: str) -> None:
@@ -228,33 +182,19 @@ def write_cache(df: pd.DataFrame, path: Path, date_col: str) -> None:
     tmp.replace(path)
 
 
-def slice_range(
-    df: pd.DataFrame,
-    date_col: str,
-    start: pd.Timestamp,
-    end: pd.Timestamp,
-) -> pd.DataFrame:
+def slice_range(df: pd.DataFrame, date_col: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
     if df.empty:
         return df
     return df[(df[date_col] >= start) & (df[date_col] <= end)].copy()
 
 
-def cached_price(
-    symbol: str,
-    start_date: str,
-    end_date: str,
-    data_dir: Path,
-    offline: bool,
-    refresh: bool,
-) -> pd.DataFrame:
+def cached_price(symbol: str, start_date: str, end_date: str, data_dir: Path, offline: bool, refresh: bool) -> pd.DataFrame:
     path = data_dir / "prices" / f"{symbol}.csv"
     cached = read_cache(path, "date")
     start, end = pd.to_datetime(start_date), pd.to_datetime(end_date)
-
     need_fetch = cached.empty or refresh
     if not cached.empty and not refresh:
         need_fetch = cached["date"].min() > start or cached["date"].max() < end
-
     if need_fetch and not offline:
         fetch_start = start
         if not cached.empty and cached["date"].min() <= start and not refresh:
@@ -262,21 +202,13 @@ def cached_price(
         try:
             if fetch_start <= end or refresh:
                 actual_start = start if refresh else fetch_start
-                new = call_with_retry(
-                    lambda: fetch_price(
-                        symbol,
-                        actual_start.strftime("%Y%m%d"),
-                        end.strftime("%Y%m%d"),
-                    ),
-                    f"{symbol} 行情",
-                )
+                new = call_with_retry(lambda: fetch_price(symbol, actual_start.strftime("%Y%m%d"), end.strftime("%Y%m%d")), f"{symbol} 行情")
                 cached = merge_cache(cached, new, "date")
                 write_cache(cached, path, "date")
         except Exception:
             if cached.empty:
                 raise
             print(f"  {symbol} 行情更新失败，使用本地缓存")
-
     if cached.empty:
         raise RuntimeError(f"{symbol} 没有行情缓存")
     result = slice_range(cached, "date", start, end)
@@ -286,17 +218,10 @@ def cached_price(
     return result
 
 
-def cached_flow(
-    symbol: str,
-    start_date: str,
-    end_date: str,
-    data_dir: Path,
-    offline: bool,
-) -> pd.DataFrame:
-    """资金流接口窗口较短；每次联网运行都与本地历史做 union，长期积累。"""
+def cached_flow(symbol: str, start_date: str, end_date: str, data_dir: Path, offline: bool) -> pd.DataFrame:
+    """辅助资金流采用 union 缓存；无缓存/请求失败由上层自动降级。"""
     path = data_dir / "fund_flow" / f"{symbol}.csv"
     cached = read_cache(path, "date")
-
     if not offline:
         try:
             new = call_with_retry(lambda: fetch_flow(symbol), f"{symbol} 资金流")
@@ -306,47 +231,23 @@ def cached_flow(
             if cached.empty:
                 raise
             print(f"  {symbol} 资金流更新失败，使用本地缓存")
-
     if cached.empty:
         raise RuntimeError(f"{symbol} 没有资金流缓存")
-    return slice_range(
-        cached,
-        "date",
-        pd.to_datetime(start_date),
-        pd.to_datetime(end_date),
-    )
+    return slice_range(cached, "date", pd.to_datetime(start_date), pd.to_datetime(end_date))
 
 
-def cached_valuation(
-    symbol: str,
-    start_date: str,
-    end_date: str,
-    data_dir: Path,
-    cfg: Config,
-    offline: bool,
-    refresh: bool,
-) -> pd.DataFrame:
+def cached_valuation(symbol: str, start_date: str, end_date: str, data_dir: Path, cfg: Config, offline: bool, refresh: bool) -> pd.DataFrame:
     path = data_dir / "valuation" / f"{symbol}.csv"
     cached = read_cache(path, "valuation_date")
     start = pd.to_datetime(start_date) - pd.Timedelta(days=cfg.valuation_max_staleness_days)
     end = pd.to_datetime(end_date)
-
     need_fetch = cached.empty or refresh
     if not cached.empty and not refresh:
-        need_fetch = (
-            cached["valuation_date"].min() > start
-            or cached["valuation_date"].max() < end
-        )
-
+        need_fetch = cached["valuation_date"].min() > start or cached["valuation_date"].max() < end
     if need_fetch and not offline:
         try:
             new = call_with_retry(
-                lambda: fetch_valuation(
-                    symbol,
-                    start.strftime("%Y%m%d"),
-                    end.strftime("%Y%m%d"),
-                    lookback_days=cfg.valuation_max_staleness_days,
-                ),
+                lambda: fetch_valuation(symbol, start.strftime("%Y%m%d"), end.strftime("%Y%m%d"), lookback_days=cfg.valuation_max_staleness_days),
                 f"{symbol} 估值",
             )
             cached = merge_cache(cached, new, "valuation_date")
@@ -355,7 +256,6 @@ def cached_valuation(
             if cached.empty:
                 raise
             print(f"  {symbol} 估值更新失败，使用本地缓存")
-
     if cached.empty:
         return pd.DataFrame(columns=VALUATION_DATA_COLS)
     return slice_range(cached, "valuation_date", start, end)
@@ -370,20 +270,24 @@ def load_data(
     offline: bool = False,
     refresh: bool = False,
 ) -> pd.DataFrame:
-    """加载行情/资金流/估值；优先使用本地增量缓存，可离线或强制刷新。"""
+    """加载行情/估值；主力资金仅在 cfg 显式开启时尝试获取，失败不会丢弃股票。"""
     frames: list[pd.DataFrame] = []
     failures: list[str] = []
-
     for symbol, meta in universe.items():
         print(f"加载 {symbol} {meta['name']} ...")
         try:
             price = cached_price(symbol, start_date, end_date, data_dir, offline, refresh)
-            flow = cached_flow(symbol, start_date, end_date, data_dir, offline)
-            merged = price.merge(flow, on="date", how="left")
+            merged = price.copy()
+            if cfg.use_auxiliary_main_flow:
+                try:
+                    flow = cached_flow(symbol, start_date, end_date, data_dir, offline)
+                    merged = merged.merge(flow, on="date", how="left")
+                except Exception as exc:
+                    print(f"  {symbol} 主力资金不可用，继续使用价格/成交模型：{exc}")
+            if "main_net_flow" not in merged.columns:
+                merged["main_net_flow"] = np.nan
             try:
-                valuation = cached_valuation(
-                    symbol, start_date, end_date, data_dir, cfg, offline, refresh
-                )
+                valuation = cached_valuation(symbol, start_date, end_date, data_dir, cfg, offline, refresh)
                 merged = attach_valuation(merged, valuation, cfg)
             except Exception as exc:
                 print(f"  {symbol} 估值不可用，自动降级：{exc}")
@@ -393,15 +297,10 @@ def load_data(
             frames.append(merged)
         except Exception as exc:
             failures.append(f"{symbol} {meta['name']}: {exc}")
-
     if failures:
         print("\n加载失败：")
         for item in failures:
             print(f"- {item}")
-
     if len(frames) < 3:
         raise RuntimeError("成功加载的股票不足 3 只")
-
-    return pd.concat(frames, ignore_index=True).sort_values(
-        ["symbol", "date"]
-    )
+    return pd.concat(frames, ignore_index=True).sort_values(["symbol", "date"])
