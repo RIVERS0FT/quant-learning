@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
+from threading import Lock
 import time
 
 import numpy as np
@@ -39,11 +40,30 @@ class MarketDataConfig:
     max_us_symbols: int | None = None
 
 
+class RequestThrottle:
+    """Thread-safe global request-start limiter for per-symbol history calls."""
+
+    def __init__(self, interval_seconds: float):
+        self.interval = max(0.0, float(interval_seconds))
+        self.lock = Lock()
+        self.last_started = 0.0
+
+    def wait(self) -> None:
+        if self.interval <= 0:
+            return
+        with self.lock:
+            now = time.monotonic()
+            remaining = self.interval - (now - self.last_started)
+            if remaining > 0:
+                time.sleep(remaining)
+            self.last_started = time.monotonic()
+
+
 MASTER_COLUMNS = [
     "symbol", "provider_symbol", "name", "market", "exchange", "active",
-    "instrument_type", "source_sector", "source_industry", "sector_l1",
-    "sector_l2", "taxonomy_rule", "market_cap", "float_market_cap",
-    "pe_current", "pb_current",
+    "instrument_type", "source_sector", "source_industry", "source_taxonomy",
+    "metadata_asof_date", "sector_l1", "sector_l2", "taxonomy_rule",
+    "market_cap", "float_market_cap", "pe_current", "pb_current",
 ]
 
 
@@ -87,6 +107,7 @@ def _fetch_missing_history(
     end: pd.Timestamp,
     cached: pd.DataFrame,
     refresh: bool,
+    throttle: RequestThrottle | None = None,
 ) -> pd.DataFrame:
     market = str(row.market)
     symbol = str(row.symbol)
@@ -107,6 +128,8 @@ def _fetch_missing_history(
         last_error = None
         for attempt in range(3):
             try:
+                if throttle is not None:
+                    throttle.wait()
                 return once()
             except Exception as exc:
                 last_error = exc
@@ -201,12 +224,16 @@ def _history_cache_path(cache_dir: Path, market: str, symbol: str) -> Path:
     return cache_dir / "history" / market / f"{_safe_symbol(symbol)}.csv.gz"
 
 
-def update_history_for_security(row, cfg: MarketDataConfig) -> tuple[str, str, pd.DataFrame, str | None]:
+def update_history_for_security(
+    row,
+    cfg: MarketDataConfig,
+    throttle: RequestThrottle | None = None,
+) -> tuple[str, str, pd.DataFrame, str | None]:
     path = _history_cache_path(cfg.cache_dir, str(row.market), str(row.symbol))
     cached = _cache_read(path, "date")
     start, end = pd.to_datetime(cfg.start_date), pd.to_datetime(cfg.end_date)
     try:
-        merged = _fetch_missing_history(row, start, end, cached, cfg.refresh_history)
+        merged = _fetch_missing_history(row, start, end, cached, cfg.refresh_history, throttle)
         if not merged.empty:
             _cache_write(merged, path)
         selected = merged[(merged["date"] >= start) & (merged["date"] <= end)].copy()
@@ -260,8 +287,12 @@ def build_unified_panel(master: pd.DataFrame, cfg: MarketDataConfig) -> tuple[pd
     status_rows = []
 
     workers = max(1, int(cfg.workers))
+    throttle = RequestThrottle(cfg.request_pause_seconds)
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(update_history_for_security, row, cfg): row for row in rows}
+        futures = {
+            pool.submit(update_history_for_security, row, cfg, throttle): row
+            for row in rows
+        }
         completed = 0
         for future in as_completed(futures):
             market, symbol, hist, error = future.result()
@@ -279,8 +310,6 @@ def build_unified_panel(master: pd.DataFrame, cfg: MarketDataConfig) -> tuple[pd
             )
             if completed % 100 == 0 or completed == len(rows):
                 print(f"历史行情进度: {completed}/{len(rows)}")
-            if cfg.request_pause_seconds > 0:
-                time.sleep(cfg.request_pause_seconds / workers)
 
     if not results:
         raise RuntimeError("没有成功加载任何 CN/US 历史行情")
@@ -289,8 +318,8 @@ def build_unified_panel(master: pd.DataFrame, cfg: MarketDataConfig) -> tuple[pd
     panel["date"] = pd.to_datetime(panel["date"], errors="coerce")
     meta_cols = [
         "symbol", "market", "name", "exchange", "instrument_type",
-        "source_sector", "source_industry", "sector_l1", "sector_l2",
-        "taxonomy_rule",
+        "source_sector", "source_industry", "source_taxonomy", "metadata_asof_date",
+        "sector_l1", "sector_l2", "taxonomy_rule",
     ]
     panel = panel.merge(master[meta_cols], on=["symbol", "market"], how="left")
     sector_col = "sector_l1" if cfg.sector_level.lower() == "l1" else "sector_l2"
