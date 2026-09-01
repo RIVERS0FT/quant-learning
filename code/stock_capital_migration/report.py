@@ -1,12 +1,32 @@
 # -*- coding: utf-8 -*-
-"""结果输出：CSV/图像落盘与终端摘要。"""
+"""结果输出：CSV 落盘与终端摘要。"""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import pandas as pd
+
+from .backtest import summarize_ic
+
+
+VALUATION_REPORT_COLS = [
+    "date",
+    "symbol",
+    "name",
+    "sector",
+    "valuation_date",
+    "valuation_age_days",
+    "pe_ttm",
+    "pb",
+    "ps_ttm",
+    "total_market_cap",
+    "float_market_cap",
+]
+
+
+def _to_csv(df: pd.DataFrame, path: Path) -> None:
+    df.to_csv(path, index=False, encoding="utf-8-sig")
 
 
 def save_results(
@@ -14,95 +34,67 @@ def save_results(
     latest: pd.DataFrame,
     edges: pd.DataFrame,
     predictions: pd.DataFrame,
-    ic_df: pd.DataFrame,
-    portfolio: pd.DataFrame,
-    no_plot: bool,
+    multi_ic: pd.DataFrame,
+    ablation: pd.DataFrame,
+    ablation_daily: pd.DataFrame,
+    ablation_portfolio: pd.DataFrame,
     output_dir: Path,
 ) -> None:
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    latest.reset_index().to_csv(
-        out / "stock_capital_migration_snapshot.csv",
-        index=False,
-        encoding="utf-8-sig",
-    )
-    edges.to_csv(
-        out / "stock_capital_migration_edges.csv",
-        index=False,
-        encoding="utf-8-sig",
-    )
-    predictions.to_csv(
-        out / "stock_capital_migration_backtest.csv",
-        index=False,
-        encoding="utf-8-sig",
-    )
-    ic_df.to_csv(
-        out / "stock_capital_migration_ic.csv",
-        index=False,
-        encoding="utf-8-sig",
+    # 最新截面与推断迁移路径。
+    _to_csv(latest.reset_index(), out / "stock_capital_migration_snapshot.csv")
+    _to_csv(edges, out / "stock_capital_migration_edges.csv")
+
+    # 多周期 Rank IC 与逐日预测。
+    _to_csv(predictions, out / "stock_capital_migration_predictions.csv")
+    _to_csv(multi_ic, out / "stock_capital_migration_multi_ic.csv")
+    _to_csv(
+        summarize_ic(multi_ic, ["horizon"]),
+        out / "stock_capital_migration_multi_ic_summary.csv",
     )
 
-    valuation_cols = [
-        "date",
-        "symbol",
-        "name",
-        "sector",
-        "valuation_date",
-        "valuation_age_days",
-        "pe_ttm",
-        "pb",
-        "ps_ttm",
-        "total_market_cap",
-        "float_market_cap",
-    ]
-    existing = [
-        c for c in valuation_cols if c in raw.columns
-    ]
-    raw[existing].to_csv(
-        out / "stock_capital_migration_valuation.csv",
-        index=False,
-        encoding="utf-8-sig",
-    )
+    # A-G 消融实验。
+    _to_csv(ablation, out / "stock_capital_migration_ablation.csv")
+    _to_csv(ablation_daily, out / "stock_capital_migration_ablation_daily_ic.csv")
+    _to_csv(ablation_portfolio, out / "stock_capital_migration_ablation_portfolio.csv")
 
-    if not no_plot and not portfolio.empty:
-        ax = portfolio.plot(
-            x="date",
-            y=[
-                "top_n_return_nav",
-                "equal_weight_return_nav",
-            ],
-            figsize=(12, 6),
-            grid=True,
-            title=(
-                "Stock Capital Migration: "
-                "Top-N vs Equal Weight"
-            ),
+    # 估值明细与数据覆盖度。
+    existing = [c for c in VALUATION_REPORT_COLS if c in raw.columns]
+    _to_csv(raw[existing], out / "stock_capital_migration_valuation.csv")
+
+    coverage = (
+        raw.groupby("symbol")
+        .agg(
+            first_date=("date", "min"),
+            last_date=("date", "max"),
+            price_rows=("date", "size"),
+            flow_rows=("main_net_flow", "count"),
         )
-        ax.set_ylabel("NAV")
-        ax.legend(
-            ["Migration Top-N", "Equal Weight"]
-        )
-        plt.tight_layout()
-        plt.savefig(
-            out / "stock_capital_migration_nav.png",
-            dpi=150,
-        )
-        plt.close()
+        .reset_index()
+    )
+    coverage["valuation_rows"] = (
+        raw.groupby("symbol")["valuation_date"].count()
+        if "valuation_date" in raw.columns
+        else 0
+    )
+    coverage["valuation_rows"] = coverage["valuation_rows"].reindex(
+        coverage.index, fill_value=0
+    )
+    _to_csv(coverage, out / "stock_capital_migration_data_coverage.csv")
 
 
 def print_summary(
     date: pd.Timestamp,
     latest: pd.DataFrame,
     edges: pd.DataFrame,
-    ic_df: pd.DataFrame,
-    portfolio: pd.DataFrame,
-    top_n: int,
+    multi_ic: pd.DataFrame,
+    ablation: pd.DataFrame,
+    data_dir: Path,
 ) -> None:
-    print(
-        f"\n========== 股票资本迁移模型："
-        f"{date.date()} =========="
-    )
+    print(f"\n========== 股票资本迁移模型：{date.date()} ==========")
+    print(f"\n数据缓存目录：{data_dir}")
 
     cols = [
         "name",
@@ -143,38 +135,23 @@ def print_summary(
         top_edges["inferred_flow"] /= 1e8
         print("\n最大推断迁移路径：")
         print(
-            top_edges[
-                [
-                    "source_name",
-                    "target_name",
-                    "inferred_flow",
-                ]
-            ]
-            .rename(
-                columns={
-                    "inferred_flow": "推断迁移(亿)"
-                }
-            )
+            top_edges[["source_name", "target_name", "inferred_flow"]]
+            .rename(columns={"inferred_flow": "推断迁移(亿)"})
             .to_string(index=False)
         )
 
-    if not ic_df.empty:
-        print(
-            f"\n平均 Rank IC："
-            f"{ic_df['rank_ic'].mean():.4f}"
-        )
-        print(
-            "Rank IC > 0 占比："
-            f"{(ic_df['rank_ic'] > 0).mean():.2%}"
-        )
+    print("\n多周期 Rank IC：")
+    print(summarize_ic(multi_ic, ["horizon"]).to_string(index=False))
 
-    if not portfolio.empty:
-        top_nav = portfolio[
-            "top_n_return_nav"
-        ].iloc[-1]
-        eq_nav = portfolio[
-            "equal_weight_return_nav"
-        ].iloc[-1]
-        print(f"Top-{top_n} 净值：{top_nav:.4f}")
-        print(f"等权净值：{eq_nav:.4f}")
-        print(f"相对净值：{top_nav / eq_nav:.4f}")
+    if not ablation.empty:
+        cols = [
+            "model",
+            "mean_rank_ic",
+            "positive_ratio",
+            "sharpe",
+            "max_drawdown",
+            "avg_turnover",
+            "mean_excess_return",
+        ]
+        print("\n消融实验（1日）：")
+        print(ablation[ablation["horizon"] == 1][cols].to_string(index=False))

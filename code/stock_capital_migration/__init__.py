@@ -18,28 +18,70 @@
 只使用该日或更早已经存在的估值记录，避免未来数据泄漏。
 
 模块结构：
-- config：默认股票池、参数、输出目录
-- data：数据获取（含东财限流重试）
-- features：特征工程
+- config：默认股票池、参数、数据/输出目录
+- data：数据获取与本地增量缓存（含东财限流重试）
+- features：特征工程与多周期前瞻收益
 - model：引力模型与迁移矩阵
-- backtest：Rank IC 与组合回测
+- backtest：有效截面、多周期 Rank IC、Top-N 组合与消融实验
 - report：结果落盘与摘要打印
-- research：研究增强版（本地缓存、多周期 IC、消融实验）
 
 运行（在 code/ 目录下）：
     python -m stock_capital_migration
-    python -m stock_capital_migration --top-n 3 --no-plot
+    python -m stock_capital_migration --offline --skip-ablation
+    python -m stock_capital_migration --refresh-cache
 
 输出：
 - 所有结果文件统一写入 code/outputs/（可用 --output-dir 覆盖）：
   stock_capital_migration_snapshot.csv
   stock_capital_migration_edges.csv
-  stock_capital_migration_backtest.csv
-  stock_capital_migration_ic.csv
+  stock_capital_migration_predictions.csv
+  stock_capital_migration_multi_ic.csv
+  stock_capital_migration_multi_ic_summary.csv
+  stock_capital_migration_ablation.csv
+  stock_capital_migration_ablation_daily_ic.csv
+  stock_capital_migration_ablation_portfolio.csv
   stock_capital_migration_valuation.csv
-  stock_capital_migration_nav.png
+  stock_capital_migration_data_coverage.csv
 """
 
-from .config import Config, DEFAULT_OUTPUT_DIR, DEFAULT_UNIVERSE
+from .backtest import (
+    multi_horizon_test,
+    rank_ic,
+    run_ablation,
+    summarize_ic,
+    valid_dates,
+)
+from .config import (
+    Config,
+    DEFAULT_DATA_DIR,
+    DEFAULT_OUTPUT_DIR,
+    DEFAULT_UNIVERSE,
+    HORIZONS,
+)
+from .data import load_data
+from .features import add_features, add_forward_returns, attraction_score
+from .model import build_distance, build_snapshot, flow_edges, gravity_flows
+from .report import print_summary, save_results
 
-__all__ = ["Config", "DEFAULT_OUTPUT_DIR", "DEFAULT_UNIVERSE"]
+__all__ = [
+    "Config",
+    "DEFAULT_DATA_DIR",
+    "DEFAULT_OUTPUT_DIR",
+    "DEFAULT_UNIVERSE",
+    "HORIZONS",
+    "add_features",
+    "add_forward_returns",
+    "attraction_score",
+    "build_distance",
+    "build_snapshot",
+    "flow_edges",
+    "gravity_flows",
+    "load_data",
+    "multi_horizon_test",
+    "print_summary",
+    "rank_ic",
+    "run_ablation",
+    "save_results",
+    "summarize_ic",
+    "valid_dates",
+]

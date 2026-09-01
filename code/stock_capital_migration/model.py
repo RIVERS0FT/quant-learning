@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 
 from .config import Config, VALUATION_RATIO_COLS
+from .features import attraction_score
 
 
 def pairwise_euclidean(features: pd.DataFrame) -> pd.DataFrame:
@@ -193,6 +194,7 @@ def build_snapshot(
     features: pd.DataFrame,
     cfg: Config,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """按传入 cfg 构建单日截面快照：吸引力、距离、迁移矩阵与迁移压力。"""
     required = [
         "main_net_flow",
         "avg_amount",
@@ -200,15 +202,19 @@ def build_snapshot(
         "volatility_z",
         "liquidity_z",
         "flow_strength_z",
-        "attractiveness",
     ]
-    day = features[
-        features["date"] == date
-    ].dropna(subset=required)
-    day = day.drop_duplicates("symbol").set_index("symbol")
+    day = (
+        features[features["date"] == date]
+        .dropna(subset=required)
+        .drop_duplicates("symbol")
+        .set_index("symbol")
+    )
     if len(day) < cfg.min_cross_section:
         raise ValueError("有效横截面不足")
 
+    day = day.copy()
+    day["attraction_score"] = attraction_score(day, cfg)
+    day["attractiveness"] = np.exp(day["attraction_score"].clip(-4, 4))
     distance = build_distance(date, day, features, cfg)
     flow = gravity_flows(day, distance, cfg)
 
@@ -223,16 +229,7 @@ def build_snapshot(
         result["net_migration"]
         / result["avg_amount"].replace(0, np.nan)
     )
-    result["predicted_price_pressure"] = (
-        cfg.impact_lambda * result["migration_pressure"]
-    )
-    return (
-        result.sort_values(
-            "migration_pressure",
-            ascending=False,
-        ),
-        flow,
-    )
+    return result.sort_values("migration_pressure", ascending=False), flow
 
 
 def flow_edges(

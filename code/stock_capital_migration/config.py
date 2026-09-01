@@ -34,6 +34,14 @@ VALUATION_DATA_COLS = [
 ]
 
 
+# 多周期 Rank IC 与消融实验使用的前瞻收益周期（交易日）。
+HORIZONS = (1, 3, 5, 10, 20)
+
+
+# 本地市场数据增量缓存（行情/资金流/估值），整体被 .gitignore 排除。
+DEFAULT_DATA_DIR = Path(__file__).resolve().parents[1] / "data"
+
+
 # 所有输出文件统一写入该目录；目录整体被 .gitignore 排除，不参与提交。
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parents[1] / "outputs"
 
@@ -70,4 +78,3 @@ class Config:
 
     top_n: int = 3
     min_cross_section: int = 5
-    impact_lambda: float = 1.0

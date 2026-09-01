@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
-"""特征工程：动量/波动/流动性/资金流强度与估值标准分。"""
+"""特征工程：动量/波动/流动性/资金流强度、估值标准分与前瞻收益。"""
 
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 
-from .config import Config, VALUATION_RATIO_COLS
+from .config import Config, HORIZONS, VALUATION_RATIO_COLS
 
 
 def zscore(s: pd.Series) -> pd.Series:
@@ -22,7 +22,10 @@ def add_valuation_features(df: pd.DataFrame) -> pd.DataFrame:
     z_cols: list[str] = []
 
     for col in VALUATION_RATIO_COLS:
-        raw = pd.to_numeric(df.get(col), errors="coerce")
+        if col in df.columns:
+            raw = pd.to_numeric(df[col], errors="coerce")
+        else:
+            raw = pd.Series(np.nan, index=df.index)
         # PE/PB/PS 非正值不适合直接作为常规估值倍数比较。
         positive = raw.where(raw > 0)
         log_col = f"{col}_log"
@@ -41,7 +44,6 @@ def add_features(data: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     def per_symbol(g: pd.DataFrame) -> pd.DataFrame:
         g = g.copy().sort_values("date")
         g["return_1d"] = g["close"].pct_change()
-        g["next_return"] = g["close"].shift(-1) / g["close"] - 1.0
         g["momentum"] = g["close"].pct_change(cfg.momentum_window)
         g["volatility"] = (
             g["return_1d"]
@@ -70,16 +72,32 @@ def add_features(data: pd.DataFrame, cfg: Config) -> pd.DataFrame:
 
     df = add_valuation_features(df)
 
-    score = (
-        cfg.attraction_w_momentum * df["momentum_z"]
-        + cfg.attraction_w_flow * df["flow_strength_z"]
-        + cfg.attraction_w_liquidity * df["liquidity_z"]
-        + cfg.attraction_w_volatility * df["volatility_z"]
-        + cfg.attraction_w_valuation * df["valuation_cheapness_z"]
-    )
+    score = attraction_score(df, cfg)
     df["attraction_score"] = score
     df["attractiveness"] = np.exp(score.clip(-4, 4))
     df["outflow_budget"] = (
         (-df["main_net_flow"]).clip(lower=0).fillna(0.0)
     )
+    return df
+
+
+def attraction_score(day: pd.DataFrame, cfg: Config) -> pd.Series:
+    """按 cfg 权重计算截面吸引力得分；缺失因子按中性值 0 处理。"""
+    return (
+        cfg.attraction_w_momentum * day["momentum_z"].fillna(0)
+        + cfg.attraction_w_flow * day["flow_strength_z"].fillna(0)
+        + cfg.attraction_w_liquidity * day["liquidity_z"].fillna(0)
+        + cfg.attraction_w_volatility * day["volatility_z"].fillna(0)
+        + cfg.attraction_w_valuation * day["valuation_cheapness_z"].fillna(0)
+    )
+
+
+def add_forward_returns(features: pd.DataFrame) -> pd.DataFrame:
+    """未来 h 个交易日收益：P[t+h]/P[t]-1。"""
+    df = features.copy().sort_values(["symbol", "date"])
+    grouped = df.groupby("symbol", group_keys=False)
+    for h in HORIZONS:
+        df[f"forward_return_{h}d"] = grouped["close"].transform(
+            lambda s, h=h: s.shift(-h) / s - 1.0
+        )
     return df
