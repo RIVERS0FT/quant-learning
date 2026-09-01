@@ -60,9 +60,10 @@ def infer_market(symbol: str) -> str:
 def fetch_price(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
     if ak is None:
         raise RuntimeError("未安装 akshare，请先运行: pip install akshare")
-    df = ak.stock_zh_a_hist(
-        symbol=symbol,
-        period="daily",
+    # 行情走新浪源（同 maotai 系列脚本）：东财 push2his 突发限流时直接断连，
+    # 新浪接口无此问题；注意新浪源不支持北交所代码。
+    df = ak.stock_zh_a_daily(
+        symbol=f"{infer_market(symbol)}{symbol}",
         start_date=start_date,
         end_date=end_date,
         adjust="qfq",
@@ -70,17 +71,7 @@ def fetch_price(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
     if df.empty:
         raise RuntimeError(f"{symbol} 无历史行情")
 
-    df = df.rename(
-        columns={
-            "日期": "date",
-            "收盘": "close",
-            "成交额": "amount",
-            "开盘": "open",
-            "最高": "high",
-            "最低": "low",
-            "成交量": "volume",
-        }
-    ).copy()
+    df = df.copy()
     required = ["date", "close", "amount"]
     missing = [c for c in required if c not in df.columns]
     if missing:
@@ -88,8 +79,9 @@ def fetch_price(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
 
     df["date"] = pd.to_datetime(df["date"])
     for col in ["open", "high", "low", "close", "volume", "amount"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    keep = [c for c in ["date", "open", "high", "low", "close", "volume", "amount"] if c in df.columns]
+    df = df[keep]
     df["symbol"] = symbol
     return df.sort_values("date")
 
